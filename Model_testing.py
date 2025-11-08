@@ -1,32 +1,46 @@
-"""
-🧪 Spider Robot Model Evaluation Script
-Comprehensive testing and diagnostics for trained models
-
-Usage:
-    python evaluate_model.py                    # Auto-find latest model
-    python evaluate_model.py --run-dir path/to/run
-    python evaluate_model.py --model model.zip --vecnorm vecnorm.pkl
-    python evaluate_model.py --compare-random   # Compare with random baseline
-"""
-
+import random,torch
+import argparse
 import sys
 import time
 from pathlib import Path
-import argparse
-
 import numpy as np
+from datetime import datetime
+
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from stable_baselines3.common.monitor import Monitor
-
+from stable_baselines3.common.utils import set_random_seed
 from spider_env import SpiderWalkEnv
+import pybullet as p
+
+def reseed_vecenv(vec_env, base_seed, ep):
+    """Seed underlying env(s) and action spaces (works with VecNormalize/DummyVecEnv)."""
+    if base_seed is None:
+        return
+    seed_ep = int(base_seed) * 1000 + int(ep)
+    try:
+        # Works through wrappers (VecNormalize) down to DummyVecEnv -> envs[i].seed(...)
+        vec_env.env_method("seed", seed_ep)
+    except Exception:
+        # Fallback: touch each sub-env directly
+        for i, e in enumerate(getattr(vec_env, "envs", [])):
+            try:
+                e.reset(seed=seed_ep + i)
+            except TypeError:
+                try:
+                    e.seed(seed=seed_ep + i)
+                except Exception:
+                    pass
+    # Seed action spaces for determinism
+    try:
+        for i, e in enumerate(getattr(vec_env, "envs", [])):
+            e.action_space.seed(seed_ep + i)
+    except Exception:
+        pass
 
 
-# ============================================================================
-# Pretty Output
-# ============================================================================
 
 class Colors:
+    """Pretty terminal colors"""
     CYAN = '\033[96m'
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
@@ -35,362 +49,329 @@ class Colors:
     END = '\033[0m'
 
 
-def print_header(text):
-    print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*80}{Colors.END}")
-    print(f"{Colors.BOLD}{Colors.CYAN}{text.center(80)}{Colors.END}")
-    print(f"{Colors.BOLD}{Colors.CYAN}{'='*80}{Colors.END}\n")
+def find_all_runs():
+    """Find all training runs sorted by date"""
+    runs_dir = Path("training_runs")
+    if not runs_dir.exists():
+        return []
+
+    runs = []
+    for run_path in runs_dir.glob("spider_ppo_*"):
+        if run_path.is_dir() and (run_path / "final_model.zip").exists():
+            # Parse timestamp from folder name
+            try:
+                timestamp_str = run_path.name.replace("spider_ppo_", "")
+                timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                runs.append((run_path, timestamp))
+            except:
+                runs.append((run_path, datetime.min))
+
+    # Sort by timestamp (newest first)
+    runs.sort(key=lambda x: x[1], reverse=True)
+    return [r[0] for r in runs]
 
 
-def print_section(text):
-    print(f"\n{Colors.BOLD}{Colors.CYAN}▶ {text}{Colors.END}")
+def list_available_runs():
+    """Display all available trained models"""
+    runs = find_all_runs()
 
+    if not runs:
+        print(f"{Colors.RED}❌ No trained models found in training_runs/{Colors.END}")
+        print("\nRun 'python Training.py' to train a model first.")
+        return
 
-def print_metric(label, value, good_threshold=None, bad_threshold=None):
-    """Print a metric with color coding"""
-    color = Colors.END
+    print(f"\n{Colors.BOLD}{Colors.CYAN}Available Trained Models:{Colors.END}\n")
 
-    if good_threshold is not None and bad_threshold is not None:
-        if isinstance(value, (int, float)):
-            if value >= good_threshold:
-                color = Colors.GREEN
-            elif value <= bad_threshold:
-                color = Colors.RED
-            else:
-                color = Colors.YELLOW
-
-    print(f"  {label:.<40} {color}{value}{Colors.END}")
-
-
-# ============================================================================
-# Testing Functions
-# ============================================================================
-
-def test_random_policy(env, num_episodes=3, max_steps=1000, render=False):
-    """
-    Test with completely random actions (baseline comparison)
-    """
-    print_section("Testing Random Policy (Baseline)")
-
-    returns = []
-    distances = []
-    heights = []
-    contacts = []
-
-    for ep in range(num_episodes):
-        obs, info = env.reset()
-        total_reward = 0
-        steps = 0
-        start_x = info.get('base_height', 0)  # Will track actual position
-        max_height = 0
-        total_contacts = 0
-
-        done = False
-        while not done and steps < max_steps:
-            # Random action
-            action = np.random.uniform(-1, 1, env.action_space.shape)
-            obs, reward, done, truncated, info = env.step(action)
-
-            total_reward += reward
-            max_height = max(max_height, info.get('base_height', 0))
-            total_contacts += info.get('contacts', 0)
-            steps += 1
-
-            if truncated:
-                break
-
-        # Get final position
-        final_pos, _ = env.unwrapped.robot if hasattr(env, 'unwrapped') else (None, None)
+    for i, run in enumerate(runs, 1):
+        # Get timestamp
+        timestamp_str = run.name.replace("spider_ppo_", "")
         try:
-            import pybullet as p
-            if env.unwrapped.robot is not None:
-                final_pos, _ = p.getBasePositionAndOrientation(env.unwrapped.robot)
-                distance = final_pos[0]  # X distance traveled
-            else:
-                distance = 0
+            dt = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+            date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
         except:
-            distance = 0
+            date_str = "Unknown date"
 
-        returns.append(total_reward)
-        distances.append(distance)
-        heights.append(max_height)
-        contacts.append(total_contacts / max(steps, 1))
+        # Check if vecnorm exists
+        has_vecnorm = (run / "vecnorm_final.pkl").exists()
+        vecnorm_str = f"{Colors.GREEN}✓{Colors.END}" if has_vecnorm else f"{Colors.YELLOW}⚠{Colors.END}"
 
-        print(f"  Episode {ep+1}: Reward={total_reward:>6.2f} | Distance={distance:>6.3f}m | Steps={steps}")
+        marker = f"{Colors.GREEN}➤{Colors.END}" if i == 1 else " "
+        print(f"  {marker} [{i}] {run.name}")
+        print(f"      Date: {date_str}")
+        print(f"      VecNormalize: {vecnorm_str}")
 
-    print(f"\n{Colors.BOLD}Random Policy Results:{Colors.END}")
-    print_metric("Avg Return", f"{np.mean(returns):.2f} ± {np.std(returns):.2f}")
-    print_metric("Avg Distance", f"{np.mean(distances):.3f}m ± {np.std(distances):.3f}m")
-    print_metric("Avg Max Height", f"{np.mean(heights):.3f}m")
-    print_metric("Avg Contacts/Step", f"{np.mean(contacts):.2f}/6")
-
-    return {
-        'returns': returns,
-        'distances': distances,
-        'heights': heights,
-        'contacts': contacts
-    }
+    print(f"\n{Colors.BOLD}Latest model will be tested by default{Colors.END}")
+    print(f"Use: python test.py --run {runs[0].name}")
+    print()
 
 
-def test_trained_model(model_path, vecnorm_path, num_episodes=5, max_steps=1000, render=True, deterministic=True):
-    """
-    Test a trained PPO model with detailed diagnostics
-    """
-    print_section(f"Testing Trained Model {'(Deterministic)' if deterministic else '(Stochastic)'}")
+def test_model(run_path, episodes=5, render=True, deterministic=True, verbose=True,seed=None):
+    """Test a trained model"""
 
-    # Check files exist
-    if not Path(model_path).exists():
-        print(f"{Colors.RED}✗ Model not found: {model_path}{Colors.END}")
-        return None
-    if not Path(vecnorm_path).exists():
-        print(f"{Colors.RED}✗ VecNormalize not found: {vecnorm_path}{Colors.END}")
+    model_path = run_path / "final_model.zip"
+    vecnorm_path = run_path / "vecnorm_final.pkl"
+
+
+
+    if not model_path.exists():
+        print(f"{Colors.RED}❌ Model not found: {model_path}{Colors.END}")
         return None
 
-    print(f"  Model: {model_path}")
-    print(f"  VecNorm: {vecnorm_path}")
+    if verbose:
+        print(f"\n{Colors.BOLD}{Colors.CYAN}{'=' * 80}{Colors.END}")
+        print(f"{Colors.BOLD}{Colors.CYAN}{'🧪 TESTING SPIDER ROBOT'.center(80)}{Colors.END}")
+        print(f"{Colors.BOLD}{Colors.CYAN}{'=' * 80}{Colors.END}\n")
+
+        print(f"{Colors.CYAN}Model:{Colors.END} {run_path.name}")
+        print(f"{Colors.CYAN}Episodes:{Colors.END} {episodes}")
+        print(f"{Colors.CYAN}Mode:{Colors.END} {'Deterministic' if deterministic else 'Stochastic'}")
+        print(f"{Colors.CYAN}Render:{Colors.END} {'Yes (GUI)' if render else 'No (Headless)'}")
+        print()
 
     # Create environment
-    def _make_env():
-        env = SpiderWalkEnv(render_mode="human" if render else None)
-        return Monitor(env)
+    env = SpiderWalkEnv(render_mode="human" if render else None,
+                        enable_watchdog=False,
+                        eval_mode=True)
+    vec_env = DummyVecEnv([lambda: env])
 
-    base_env = DummyVecEnv([_make_env])
-    vec_env = VecNormalize.load(vecnorm_path, base_env)
-    vec_env.training = False
-    vec_env.norm_reward = False
+    # Load VecNormalize if available
+    if vecnorm_path.exists():
+        vec_env = VecNormalize.load(str(vecnorm_path), vec_env)
+        vec_env.training = False
+        vec_env.norm_reward = False
+        _=vec_env.reset()
+        if verbose:
+            print(f"{Colors.GREEN}✓{Colors.END} Loaded VecNormalize statistics")
+    else:
+        if verbose:
+            print(f"{Colors.YELLOW}⚠{Colors.END} No VecNormalize found (training may have been interrupted)")
+
+    if seed is not None:
+        set_random_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        try:
+            torch.manual_seed(seed)
+        except:
+            pass
+        try:
+            vec_env.seed(seed)
+        except:
+            pass
 
     # Load model
-    try:
-        model = PPO.load(model_path, env=vec_env, device="cpu", print_system_info=False)
-        print(f"{Colors.GREEN}✓ Model loaded successfully{Colors.END}\n")
-    except Exception as e:
-        print(f"{Colors.RED}✗ Failed to load model: {e}{Colors.END}")
-        return None
+    model = PPO.load(str(model_path), device='cpu')
+    if verbose:
+        print(f"{Colors.GREEN}✓{Colors.END} Loaded model\n")
+        print(f"{Colors.BOLD}Running episodes...{Colors.END}\n")
 
-    # Test episodes
-    returns = []
-    distances = []
-    heights = []
-    contacts_per_step = []
-    action_magnitudes = []
+    # Track results
+    results = {
+        'returns': [],
+        'distances': [],
+        'lengths': [],
+        'contacts': [],
+        'success': []  # Episodes with >0.5m distance
+    }
 
-    print(f"{Colors.BOLD}Running {num_episodes} episodes...{Colors.END}\n")
-
-    for ep in range(num_episodes):
+    # Run episodes
+    for ep in range(1, episodes + 1):
+        reseed_vecenv(vec_env, seed, ep)
         obs = vec_env.reset()
         done = np.array([False])
-        total_reward = 0
-        steps = 0
-        max_height = 0
+
+        ep_return = 0.0
+        ep_length = 0
+
         total_contacts = 0
-        action_mags = []
 
-        # Get starting position
-        import pybullet as p
-        robot = vec_env.envs[0].unwrapped.robot
-        start_pos, _ = p.getBasePositionAndOrientation(robot)
-        start_x = start_pos[0]
+        last_distance = 0.0
+        last_info = {}
 
-        while not done.any() and steps < max_steps:
+        max_distance=0.0
+
+        # Run episode
+        while not done.any():
             action, _ = model.predict(obs, deterministic=deterministic)
             obs, reward, done, info = vec_env.step(action)
 
-            total_reward += float(reward[0])
-            max_height = max(max_height, info[0].get('base_height', 0))
-            total_contacts += info[0].get('contacts', 0)
-            action_mags.append(np.abs(action).mean())
-            steps += 1
+            ep_return += float(reward[0])
+            ep_length += 1
+
+            last_info=info[0] if isinstance(info,(list,tuple)) and len(info) else {}
+
+            if "distance_traveled" in last_info:
+                last_distance = float(last_info["distance_traveled"])
+
+            if "contacts" in last_info:
+                total_contacts += float(last_info["contacts"])
+
+            if "distance_traveled" in last_info:
+                last_distance=float(last_info["distance_traveled"])
+                if last_distance>max_distance:
+                    max_distance=last_distance
+
 
         # Get final position
-        final_pos, _ = p.getBasePositionAndOrientation(robot)
-        distance = final_pos[0] - start_x
+        distance = last_distance
+        avg_contacts = total_contacts / ep_length if ep_length > 0 else 0
 
-        returns.append(total_reward)
-        distances.append(distance)
-        heights.append(max_height)
-        contacts_per_step.append(total_contacts / max(steps, 1))
-        action_magnitudes.append(np.mean(action_mags))
+        # Store results
+        results['returns'].append(ep_return)
+        results['distances'].append(distance)
+        results.setdefault('max_distances', []).append(max_distance)
+        results['lengths'].append(ep_length)
+        results['contacts'].append(avg_contacts)
+        results['success'].append(distance > 0.5)
 
-        status = f"{Colors.GREEN}✓{Colors.END}" if distance > 0.5 else f"{Colors.RED}✗{Colors.END}"
-        print(f"  {status} Episode {ep+1}: "
-              f"Reward={total_reward:>7.2f} | "
-              f"Distance={distance:>6.3f}m | "
-              f"Steps={steps:>4} | "
-              f"Contacts={total_contacts/max(steps,1):.1f}/6")
+        # Print episode result
+        status = (f"{Colors.GREEN}✓ GREAT{Colors.END}" if distance > 1.0
+                  else f"{Colors.GREEN}✓ Good{Colors.END} " if distance > 0.5
+                  else f"{Colors.YELLOW}○ Okay{Colors.END} " if distance > 0.1
+                  else f"{Colors.RED}✗ Poor{Colors.END} ")
 
-    # Summary statistics
-    print(f"\n{Colors.BOLD}Trained Model Results:{Colors.END}")
-    print_metric("Avg Return", f"{np.mean(returns):.2f} ± {np.std(returns):.2f}")
-    print_metric("Avg Distance", f"{np.mean(distances):.3f}m ± {np.std(distances):.3f}m",
-                 good_threshold=1.0, bad_threshold=0.1)
-    print_metric("Max Distance", f"{np.max(distances):.3f}m")
-    print_metric("Min Distance", f"{np.min(distances):.3f}m")
-    print_metric("Avg Max Height", f"{np.mean(heights):.3f}m")
-    print_metric("Avg Contacts/Step", f"{np.mean(contacts_per_step):.2f}/6",
-                 good_threshold=3.0, bad_threshold=1.0)
-    print_metric("Avg Action Magnitude", f"{np.mean(action_magnitudes):.3f}",
-                 good_threshold=0.3, bad_threshold=0.05)
+        term = last_info.get("termination_reason", "")
+        term_str = f" | Term={term}" if term else ""
 
-    # Diagnosis
-    print(f"\n{Colors.BOLD}Diagnosis:{Colors.END}")
+        print(f"  {status} Ep {ep:2d}: Distance={last_distance:6.3f}m | "
+              f"MaxDist={max_distance:6.3f}m | Reward={ep_return:7.2f} | "
+              f"Steps={ep_length:4d} | Contacts={avg_contacts:.1f}/6{term_str}")
 
-    avg_dist = np.mean(distances)
-    avg_action = np.mean(action_magnitudes)
+    # Print summary
+    if verbose:
+        print(f"\n{Colors.BOLD}{'=' * 80}{Colors.END}")
+        print(f"{Colors.BOLD}SUMMARY{Colors.END}")
+        print(f"{Colors.BOLD}{'=' * 80}{Colors.END}\n")
 
-    if avg_dist < 0.1:
-        print(f"  {Colors.RED}⚠ Robot is NOT moving forward!{Colors.END}")
-        if avg_action < 0.1:
-            print(f"    • Actions are very small (avg={avg_action:.3f})")
-            print(f"    • Model may have collapsed to near-zero policy")
-            print(f"    • Try: Lower entropy coefficient, check reward shaping")
+        avg_dist = np.mean(results['distances'])
+        max_dist = np.max(results['distances'])
+        min_dist = np.min(results['distances'])
+        success_rate = sum(results['success']) / len(results['success']) * 100
+        avg_max_dist = np.mean(results.get('max_distances', results['distances']))
+        max_of_max = np.max(results.get('max_distances', results['distances']))
+        min_of_max = np.min(results.get('max_distances', results['distances']))
+
+        print(f"  {'Distance (avg)':<25} {avg_dist:6.3f}m ± {np.std(results['distances']):5.3f}m")
+        print(f"  {'Distance (max)':<25} {max_dist:6.3f}m")
+        print(f"  {'Distance (min)':<25} {min_dist:6.3f}m")
+        print(f"  {'Success Rate (>0.5m)':<25} {success_rate:5.1f}%")
+        print(f"  {'Avg Return':<25} {np.mean(results['returns']):7.2f} ± {np.std(results['returns']):6.2f}")
+        print(f"  {'Avg Episode Length':<25} {np.mean(results['lengths']):6.0f} steps")
+        print(f"  {'Avg Contacts':<25} {np.mean(results['contacts']):4.2f}/6")
+
+        print(f"  {'Max Distance (avg)':<25} {avg_max_dist:6.3f}m")
+        print(f"  {'Max Distance (max)':<25} {max_of_max:6.3f}m")
+        print(f"  {'Max Distance (min)':<25} {min_of_max:6.3f}m")
+
+        print()
+
+        # Diagnosis
+        if avg_dist > 1.0:
+            print(f"{Colors.GREEN}✓ EXCELLENT{Colors.END} - Robot walks consistently well!")
+        elif avg_dist > 0.5:
+            print(f"{Colors.GREEN}✓ GOOD{Colors.END} - Robot walks, but could be more consistent")
+        elif avg_dist > 0.1:
+            print(f"{Colors.YELLOW}⚠ FAIR{Colors.END} - Robot moves but struggles")
+            print("  Consider: More training time or reward tuning")
         else:
-            print(f"    • Actions are active (avg={avg_action:.3f}) but not productive")
-            print(f"    • Try: Check reward function, increase training time")
-    elif avg_dist < 0.5:
-        print(f"  {Colors.YELLOW}⚠ Robot is moving but slowly{Colors.END}")
-        print(f"    • Average distance: {avg_dist:.3f}m")
-        print(f"    • Needs more training or reward tuning")
-    else:
-        print(f"  {Colors.GREEN}✓ Robot is walking successfully!{Colors.END}")
-        print(f"    • Average distance: {avg_dist:.3f}m")
+            print(f"{Colors.RED}✗ POOR{Colors.END} - Robot not moving forward reliably")
+            print("  Consider: Check reward function, increase training")
 
-    if np.mean(contacts_per_step) < 2.0:
-        print(f"  {Colors.RED}⚠ Low ground contact (avg={np.mean(contacts_per_step):.1f}/6){Colors.END}")
-        print(f"    • Robot may be falling or unstable")
-        print(f"    • Check spawn height and stance configuration")
+        if success_rate < 50:
+            print(f"\n{Colors.YELLOW}⚠{Colors.END} Low success rate - high variance in performance")
+            print("  The robot learned to walk but needs more training for consistency")
+
+        print(f"\n{Colors.BOLD}{'=' * 80}{Colors.END}\n")
 
     if render:
-        print(f"\n{Colors.YELLOW}GUI is open. Press Q to close.{Colors.END}")
-        _keep_gui_open()
+        print(f"{Colors.YELLOW}Press Q in the PyBullet window to close{Colors.END}\n")
 
-    vec_env.close()
-
-    return {
-        'returns': returns,
-        'distances': distances,
-        'heights': heights,
-        'contacts': contacts_per_step,
-        'actions': action_magnitudes
-    }
-
-
-def _keep_gui_open():
-    """Keep PyBullet GUI open"""
     try:
-        import pybullet as p
-        if p.isConnected():
-            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
-            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
-            try:
-                p.resetDebugVisualizerCamera(distance=1.5, yaw=45, pitch=-30, targetPosition=[0, 0, 0.1])
-            except:
-                pass
-
-            while p.isConnected():
-                keys = p.getKeyboardEvents()
-                if ord('q') in keys or ord('Q') in keys:
-                    break
-                time.sleep(0.01)
-    except:
+        vec_env.close()
+        p.disconnect()
+    except Exception:
         pass
 
+    return results
 
-def compare_policies(trained_results, random_results):
-    """
-    Compare trained model vs random baseline
-    """
-    if trained_results is None or random_results is None:
-        return
-
-    print_section("Comparison: Trained vs Random")
-
-    improvement_reward = (np.mean(trained_results['returns']) - np.mean(random_results['returns'])) / max(abs(np.mean(random_results['returns'])), 1e-6)
-    improvement_distance = np.mean(trained_results['distances']) - np.mean(random_results['distances'])
-
-    print(f"\n  {'Metric':<25} {'Random':>12} {'Trained':>12} {'Improvement':>15}")
-    print(f"  {'-'*70}")
-    print(f"  {'Return':<25} {np.mean(random_results['returns']):>12.2f} {np.mean(trained_results['returns']):>12.2f} {improvement_reward:>14.1%}")
-    print(f"  {'Distance (m)':<25} {np.mean(random_results['distances']):>12.3f} {np.mean(trained_results['distances']):>12.3f} {improvement_distance:>14.3f}m")
-    print(f"  {'Contacts/Step':<25} {np.mean(random_results['contacts']):>12.2f} {np.mean(trained_results['contacts']):>12.2f}")
-
-    if improvement_distance < 0.3:
-        print(f"\n  {Colors.RED}⚠ Model is not significantly better than random!{Colors.END}")
-        print(f"    • Training may not be working properly")
-        print(f"    • Check: reward function, network size, training duration")
-    elif improvement_distance < 1.0:
-        print(f"\n  {Colors.YELLOW}⚠ Model shows some improvement but needs more training{Colors.END}")
-    else:
-        print(f"\n  {Colors.GREEN}✓ Model is significantly better than random!{Colors.END}")
-
-
-# ============================================================================
-# Main
-# ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Test Spider Robot Model")
-    parser.add_argument("--model", type=str, default=None, help="Path to model (e.g., final_model.zip)")
-    parser.add_argument("--vecnorm", type=str, default=None, help="Path to vecnorm (e.g., vecnorm_final.pkl)")
-    parser.add_argument("--episodes", type=int, default=5, help="Number of test episodes")
-    parser.add_argument("--max-steps", type=int, default=1000, help="Max steps per episode")
-    parser.add_argument("--no-render", action="store_true", help="Don't show GUI")
-    parser.add_argument("--compare-random", action="store_true", help="Also test random policy for comparison")
-    parser.add_argument("--run-dir", type=str, default=None, help="Auto-find latest run in this directory")
+    parser = argparse.ArgumentParser(
+        description='Test trained Spider Robot models',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python test.py                    # Test latest model with GUI
+  python test.py --episodes 10      # Test with 10 episodes  
+  python test.py --no-render        # Test without GUI (faster)
+  python test.py --list             # List all available models
+  python test.py --run spider_ppo_20251107_123255  # Test specific model
+        """
+    )
+
+    parser.add_argument('--run', type=str, default=None,
+                        help='Specific run to test (default: latest)')
+    parser.add_argument('--episodes', type=int, default=5,
+                        help='Number of episodes to test (default: 5)')
+    parser.add_argument('--no-render', action='store_true',
+                        help='Disable GUI rendering (faster testing)')
+    parser.add_argument('--stochastic', action='store_true',
+                        help='Use stochastic policy instead of deterministic')
+    parser.add_argument('--list', action='store_true',
+                        help='List all available trained models')
+    parser.add_argument('--seed', type=int, default=None, help='Random seed for env & policy')
+
 
     args = parser.parse_args()
 
-    print_header("🧪 SPIDER ROBOT MODEL TESTING")
-
-    # Auto-find latest model if run-dir provided
-    if args.run_dir:
-        run_path = Path(args.run_dir)
-        if not run_path.exists():
-            print(f"{Colors.RED}✗ Run directory not found: {run_path}{Colors.END}")
-            return
-
-        args.model = str(run_path / "final_model.zip")
-        args.vecnorm = str(run_path / "vecnorm_final.pkl")
-        print(f"Auto-detected model from: {run_path}\n")
-
-    # Auto-find latest in training_runs if nothing specified
-    if args.model is None:
-        training_runs = Path("training_runs")
-        if training_runs.exists():
-            runs = sorted(training_runs.glob("spider_ppo_*"), key=lambda x: x.stat().st_mtime, reverse=True)
-            if runs:
-                latest = runs[0]
-                args.model = str(latest / "final_model.zip")
-                args.vecnorm = str(latest / "vecnorm_final.pkl")
-                print(f"Auto-detected latest model: {latest.name}\n")
-
-    if args.model is None:
-        print(f"{Colors.RED}✗ No model specified. Use --model or --run-dir{Colors.END}")
-        print("\nUsage examples:")
-        print("  python test_model.py --run-dir training_runs/spider_ppo_20241104_143522")
-        print("  python test_model.py --model path/to/model.zip --vecnorm path/to/vecnorm.pkl")
+    # List models if requested
+    if args.list:
+        list_available_runs()
         return
 
-    # Test random baseline if requested
-    random_results = None
-    if args.compare_random:
-        temp_env = SpiderWalkEnv(render_mode=None)
-        random_results = test_random_policy(temp_env, num_episodes=3, max_steps=args.max_steps, render=False)
-        temp_env.close()
+    # Find runs
+    runs = find_all_runs()
 
-    # Test trained model
-    trained_results = test_trained_model(
-        model_path=args.model,
-        vecnorm_path=args.vecnorm,
-        num_episodes=args.episodes,
-        max_steps=args.max_steps,
-        render=not args.no_render,
-        deterministic=True
-    )
+    if not runs:
+        print(f"{Colors.RED}❌ No trained models found!{Colors.END}")
+        print("\nTo train a model, run: python Training.py")
+        sys.exit(1)
 
-    # Compare
-    if random_results and trained_results:
-        compare_policies(trained_results, random_results)
+    # Select run
+    if args.run:
+        # User specified a run
+        run_path = Path("training_runs") / args.run
+        if not run_path.exists():
+            # Try exact path
+            run_path = Path(args.run)
 
-    print_header("✅ TESTING COMPLETE")
+        if not run_path.exists() or not (run_path / "final_model.zip").exists():
+            print(f"{Colors.RED}❌ Run not found: {args.run}{Colors.END}")
+            print(f"\nAvailable runs:")
+            for r in runs[:5]:  # Show first 5
+                print(f"  - {r.name}")
+            sys.exit(1)
+    else:
+        # Use latest run
+        run_path = runs[0]
+        print(f"{Colors.CYAN}Using latest model: {run_path.name}{Colors.END}")
+
+    # Test the model
+    try:
+        test_model(
+            run_path=run_path,
+            episodes=args.episodes,
+            render=not args.no_render,
+            deterministic=not args.stochastic,
+            verbose=True,
+            seed=args.seed,
+        )
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Testing interrupted by user{Colors.END}")
+    except Exception as e:
+        print(f"\n{Colors.RED}❌ Error during testing: {e}{Colors.END}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

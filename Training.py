@@ -1,8 +1,3 @@
-"""
-🕷️ Spider Robot PPO Training - Clean & Readable Output
-One-click training script with beautiful console output
-"""
-
 import os
 import sys
 from datetime import datetime
@@ -18,7 +13,6 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from spider_env import SpiderWalkEnv
 
-
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -31,7 +25,7 @@ class Config:
 
     # Training settings
     N_ENVS = 8
-    TOTAL_TIMESTEPS = 3_000_000
+    TOTAL_TIMESTEPS = 10_000_000
     N_STEPS = max(64, 2048 // max(1, N_ENVS))
     BATCH_SIZE = 512
     N_EPOCHS = 10
@@ -41,7 +35,7 @@ class Config:
     GAE_LAMBDA = 0.95
     LEARNING_RATE = 3e-4
     CLIP_RANGE = 0.2
-    ENT_COEF = 0.0
+    ENT_COEF = 0.02
     VF_COEF = 0.5
     MAX_GRAD_NORM = 0.5
     POLICY_LAYERS = [256, 256]
@@ -150,7 +144,7 @@ class CleanProgressCallback(BaseCallback):
         self.total_timesteps = total_timesteps
         self.start_time = None
         self.last_print_time = 0
-        self.print_interval = 5  # Print every 5 seconds
+        self.print_interval = 20 # Print every 5 seconds
 
     def _on_training_start(self):
         self.start_time = time.time()
@@ -280,6 +274,7 @@ def make_train_vecenv(n_envs: int):
 def create_model(venv, config):
     """Create PPO model"""
     import torch as th
+    from pathlib import Path
 
     print_section("Initializing PPO Model")
 
@@ -313,6 +308,21 @@ def create_model(venv, config):
         policy_kwargs=policy_kwargs,
         device=device,
     )
+
+    pretrain_path=Path("pretrained_model/pretrained_policy.zip")
+    if pretrain_path.exists():
+        print_info("Pre-training", "Loading imitation learning weights...")
+        try:
+            pretrained=PPO.load(str(pretrain_path),device=device)
+            model.policy.load_state_dict(pretrained.policy.state_dict())
+            print_success("✓ Loaded pre-trained walking behavior!")
+            print_info("  ", "Robot starts with knowledge of tripod gait")
+        except Exception as e:
+            print_warning(f"Could not load pre-trained model: {e}")
+            print_info("  ", "Training from scratch instead")
+    else:
+        print_warning("No pre-trained model found - training from scratch")
+        print_info("  ", f"Run 'python pretrain.py' first to create {pretrain_path}")
 
     total_params = sum(p.numel() for p in model.policy.parameters())
     print_info("Total Parameters", f"{total_params:,}")

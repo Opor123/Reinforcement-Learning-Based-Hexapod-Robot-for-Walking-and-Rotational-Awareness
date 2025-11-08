@@ -21,7 +21,7 @@
     <parent link="base_link"/>
     <child link="leg0_seg0"/>
     <origin xyz="0.085 0.0 -0.015" rpy="0 0 0.0"/>
-    <axis xyz="0 0 1"/>
+    <axis xyz="0 0 -1"/>
     <limit lower="-0.785" upper="0.785" effort="6.0" velocity="20.0"/>
     <dynamics damping="0.06" friction="0.03"/>
   </joint>
@@ -148,7 +148,7 @@
     <parent link="base_link"/>
     <child link="leg1_seg0"/>
     <origin xyz="0.04250000000000001 0.07361215932167729 -0.015" rpy="0 0 1.0471975511965976"/>
-    <axis xyz="0 0 1"/>
+    <axis xyz="0 0 -1"/>
     <limit lower="-0.785" upper="0.785" effort="6.0" velocity="20.0"/>
     <dynamics damping="0.06" friction="0.03"/>
   </joint>
@@ -275,7 +275,7 @@
     <parent link="base_link"/>
     <child link="leg2_seg0"/>
     <origin xyz="-0.04249999999999998 0.07361215932167729 -0.015" rpy="0 0 2.0943951023931953"/>
-    <axis xyz="0 0 1"/>
+    <axis xyz="0 0 -1"/>
     <limit lower="-0.785" upper="0.785" effort="6.0" velocity="20.0"/>
     <dynamics damping="0.06" friction="0.03"/>
   </joint>
@@ -402,7 +402,7 @@
     <parent link="base_link"/>
     <child link="leg3_seg0"/>
     <origin xyz="-0.085 1.0409497792752502e-17 -0.015" rpy="0 0 3.141592653589793"/>
-    <axis xyz="0 0 1"/>
+    <axis xyz="0 0 -1"/>
     <limit lower="-0.785" upper="0.785" effort="6.0" velocity="20.0"/>
     <dynamics damping="0.06" friction="0.03"/>
   </joint>
