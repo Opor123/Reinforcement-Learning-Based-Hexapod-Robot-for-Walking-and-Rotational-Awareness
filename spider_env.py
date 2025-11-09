@@ -61,14 +61,14 @@ class SpiderWalkEnv(gym.Env):
         self._step = 0
 
         # Reward weights
-        self.w_fwd = 10.0              # forward velocity
-        self.w_fwd_dist = 25.0        # forward displacement
-        self.w_backward = -20.0        # penalty coef for backward
+        self.w_fwd = 15.0              # forward velocity
+        self.w_fwd_dist = 35.0        # forward displacement
+        self.w_backward = -50.0        # penalty coef for backward
         self.w_alive = 0.3
-        self.w_tilt = 1.0
+        self.w_tilt = 0.6
         self.w_energy = 0.0010
         self.w_smooth = 0.0040
-        self.w_height = 0.8
+        self.w_height = 0.5
         self.w_contact = 0.15
         self.w_lat = 0.15
         self.w_yawrate = 0.03
@@ -273,9 +273,9 @@ class SpiderWalkEnv(gym.Env):
 
         backstep_pen = 0.0
         if distance_delta < 0.0:
-            backstep_pen += self.w_backward * (-distance_delta) * 2.0
+            backstep_pen += self.w_backward * (-distance_delta) * 4.0
         if forward_vel < 0.0:
-            backstep_pen += self.w_backward * (-forward_vel) * self.dt * 2.0
+            backstep_pen += self.w_backward * (-forward_vel) * self.dt * 4.0
 
         # Progress reward (velocity + displacement)
         velocity_reward = self.w_fwd * max(0.0, forward_vel) * self.dt
@@ -310,13 +310,21 @@ class SpiderWalkEnv(gym.Env):
         # Alive bonus
         alive_bonus = self.w_alive * self.dt
 
+        #speed bonus
+        speed_bonus=0.0
+        if forward_vel>0.15:
+            speed_bonus=5.0*(forward_vel-0.15)
+        elif forward_vel<0.0:
+            speed_bonus-=-10.0*abs(forward_vel)
+
+
         # Total reward
         reward = (
             velocity_reward + distance_reward + stability_reward + height_penalty +
             contact_bonus + energy_penalty + smoothness_penalty + lateral_penalty +
-            yaw_penalty + vz_penalty + backstep_pen + alive_bonus + heading_bonus
+            yaw_penalty + vz_penalty + backstep_pen + alive_bonus + heading_bonus +
+            speed_bonus
         )
-        reward = float(np.clip(reward, -10.0, 50.0))
 
         # --- Termination / truncation ---
         done = (
@@ -365,6 +373,9 @@ class SpiderWalkEnv(gym.Env):
         # small completion bonus when only truncated
         if truncated and not done:
             reward += 8.0
+
+        reward = float(np.clip(reward, -10.0, 50.0))
+
 
         # Gymnasium API: (obs, reward, terminated, truncated, info)
         return self._get_obs(), reward, bool(done), bool(truncated), info

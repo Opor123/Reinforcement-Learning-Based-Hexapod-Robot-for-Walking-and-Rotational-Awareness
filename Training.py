@@ -25,7 +25,7 @@ class Config:
 
     # Training settings
     N_ENVS = 8
-    TOTAL_TIMESTEPS = 10_000_000
+    TOTAL_TIMESTEPS = 20_000_000
     N_STEPS = max(64, 2048 // max(1, N_ENVS))
     BATCH_SIZE = 512
     N_EPOCHS = 10
